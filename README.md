@@ -1,7 +1,7 @@
 # user-locks
 
 A Windows userspace port of the three-lock-type API from the
-[xv6 synchronization homework](https://github.com/bushidocodes/hw5-19-synchronization-bushidocodes).
+xv6 synchronization homework.
 Follows the same structure as [user-threads](https://github.com/bushidocodes/user-threads).
 
 ## Background
