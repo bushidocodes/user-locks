@@ -11,6 +11,9 @@ else()
 endif()
 
 add_executable(test_lock
+    lock.c
+    tu_a.c
+    tu_b.c
     test_lock.c
     unity/unity.c
 )
