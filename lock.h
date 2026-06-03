@@ -1,6 +1,4 @@
 #pragma once
-#ifndef LOCK_H
-#define LOCK_H
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -219,5 +217,3 @@ static inline void lock_delete(int lockid) {
     _lktable.slots[lockid].in_use = 0;
     LeaveCriticalSection(&_lktable.guard);
 }
-
-#endif /* LOCK_H */
