@@ -2,6 +2,20 @@
 #include "unity/unity.h"
 #include <windows.h>
 
+/* ── forward declarations for cross-TU test helpers ──────────────────── */
+
+/* tu_a.c */
+int          tu_a_take(int lockid);
+int          tu_a_release(int lockid);
+void         tu_a_set_work(int lockid, volatile int *counter, int iters);
+DWORD WINAPI tu_a_worker(LPVOID p);
+
+/* tu_b.c */
+int          tu_b_take(int lockid);
+int          tu_b_release(int lockid);
+void         tu_b_set_work(int lockid, volatile int *counter, int iters);
+DWORD WINAPI tu_b_worker(LPVOID p);
+
 /* ── test parameters ──────────────────────────────────────────────────── */
 
 #define N_THREADS  4
@@ -281,6 +295,77 @@ void test_200_sequential_create_delete_cycles(void) {
     }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * Group 8 – multi-TU correctness
+ *
+ * These tests verify that _lktable lives in exactly one translation unit
+ * (lock.c) and is shared across all TUs that include lock.h.
+ *
+ * With the old header-only design, each TU got its own static copy of
+ * _lktable; lock IDs created in one TU were invisible in another.  The
+ * tests below would have silently returned wrong counter values or
+ * lock_take returning -1 (invalid slot) when called from a different TU.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+#define CROSS_TU_ITERS 25000
+
+/*
+ * A lock created in this (test) TU must be usable from TU_A and TU_B.
+ * If there were separate per-TU tables, the lock ID would reference an
+ * unallocated slot in the other table and lock_take would return -1.
+ */
+void test_cross_tu_lockid_visible_across_tus(void) {
+    int id = lock_create(LOCK_SPIN);
+    TEST_ASSERT_NOT_EQUAL(-1, id);
+
+    /* TU_A can take and release a lock whose slot lives in lock.c's table */
+    TEST_ASSERT_EQUAL(0, tu_a_take(id));
+    TEST_ASSERT_EQUAL(0, tu_a_release(id));
+
+    /* TU_B can do the same */
+    TEST_ASSERT_EQUAL(0, tu_b_take(id));
+    TEST_ASSERT_EQUAL(0, tu_b_release(id));
+
+    lock_delete(id);
+}
+
+static void run_cross_tu_counter_test(lock_type_t type) {
+    volatile int counter = 0;
+    int lockid = lock_create(type);
+    TEST_ASSERT_NOT_EQUAL(-1, lockid);
+
+    tu_a_set_work(lockid, &counter, CROSS_TU_ITERS);
+    tu_b_set_work(lockid, &counter, CROSS_TU_ITERS);
+
+    HANDLE handles[2];
+    handles[0] = CreateThread(NULL, 0, tu_a_worker, NULL, 0, NULL);
+    handles[1] = CreateThread(NULL, 0, tu_b_worker, NULL, 0, NULL);
+    TEST_ASSERT_NOT_NULL(handles[0]);
+    TEST_ASSERT_NOT_NULL(handles[1]);
+    WaitForMultipleObjects(2, handles, TRUE, INFINITE);
+    CloseHandle(handles[0]);
+    CloseHandle(handles[1]);
+
+    /* Every increment from both TUs must be visible: no lost updates. */
+    TEST_ASSERT_EQUAL(2 * CROSS_TU_ITERS, (int)counter);
+    lock_delete(lockid);
+}
+
+/* One thread from TU_A and one from TU_B both use the same SPIN lock. */
+void test_cross_tu_spin_lock_protects_counter(void) {
+    run_cross_tu_counter_test(LOCK_SPIN);
+}
+
+/* Same for BLOCK. */
+void test_cross_tu_block_lock_protects_counter(void) {
+    run_cross_tu_counter_test(LOCK_BLOCK);
+}
+
+/* Same for ADAPTIVE. */
+void test_cross_tu_adaptive_lock_protects_counter(void) {
+    run_cross_tu_counter_test(LOCK_ADAPTIVE);
+}
+
 /* ── main ─────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -321,6 +406,12 @@ int main(void) {
 
     /* resource exhaustion */
     RUN_TEST(test_200_sequential_create_delete_cycles);
+
+    /* multi-TU correctness */
+    RUN_TEST(test_cross_tu_lockid_visible_across_tus);
+    RUN_TEST(test_cross_tu_spin_lock_protects_counter);
+    RUN_TEST(test_cross_tu_block_lock_protects_counter);
+    RUN_TEST(test_cross_tu_adaptive_lock_protects_counter);
 
     return UNITY_END();
 }
