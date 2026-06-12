@@ -136,7 +136,12 @@ int lock_take(int lockid) {
     }
     }
 
+    /* Record ownership under the guard: s->owner must only be written
+     * while holding it, since the double-take check in lock_take and the
+     * ownership check in lock_release read it under the guard.          */
+    EnterCriticalSection(&_lktable.guard);
     s->owner = GetCurrentThreadId();
+    LeaveCriticalSection(&_lktable.guard);
     return 0;
 }
 
@@ -158,10 +163,11 @@ int lock_release(int lockid) {
         return -1;
     }
     lock_type_t type = s->type;
+    /* Clear owner under the guard (all owner writes happen there) and
+     * before the lock word is released, so waiters see a clean state.  */
+    s->owner = 0;
     LeaveCriticalSection(&_lktable.guard);
 
-    /* Clear owner before releasing the lock so waiters see a clean state. */
-    s->owner = 0;
     InterlockedExchange(&s->locked, 0);
 
     /* Wake all threads blocked in WaitOnAddress for BLOCK and ADAPTIVE. */

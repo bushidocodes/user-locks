@@ -27,14 +27,16 @@ DWORD WINAPI tu_b_worker(LPVOID p);
 static volatile int  g_counter;
 static volatile DWORD g_race_val;
 static volatile LONG  g_race_ok;
+static volatile LONG  g_proto_errors;
 
 /* ── setUp / tearDown ─────────────────────────────────────────────────── */
 
 void setUp(void) {
     _lock_reset_table();
-    g_counter  = 0;
-    g_race_val = 0;
-    g_race_ok  = 0;
+    g_counter      = 0;
+    g_race_val     = 0;
+    g_race_ok      = 0;
+    g_proto_errors = 0;
 }
 
 void tearDown(void) {}
@@ -71,6 +73,23 @@ DWORD WINAPI race_thread(LPVOID p) {
     return 0;
 }
 
+/*
+ * Hammers the take → double-take → release protocol.  If the ownership
+ * record (s->owner) were ever corrupted by a racing take/release, one of
+ * these calls would return the wrong code: the double-take would succeed
+ * or the release would be rejected, leaking the lock.
+ * Unity asserts are not thread-safe, so failures are counted instead.
+ */
+DWORD WINAPI owner_proto_thread(LPVOID p) {
+    count_arg_t *a = (count_arg_t *)p;
+    for (int i = 0; i < a->iters; i++) {
+        if (lock_take(a->lockid) != 0)    InterlockedIncrement(&g_proto_errors);
+        if (lock_take(a->lockid) != -1)   InterlockedIncrement(&g_proto_errors);
+        if (lock_release(a->lockid) != 0) InterlockedIncrement(&g_proto_errors);
+    }
+    return 0;
+}
+
 /* ── test helpers ─────────────────────────────────────────────────────── */
 
 static void run_counter_test(lock_type_t type) {
@@ -102,6 +121,24 @@ static void run_race_test(lock_type_t type) {
     for (int i = 0; i < RACE_N; i++) CloseHandle(handles[i]);
 
     TEST_ASSERT_EQUAL(RACE_N, (int)g_race_ok);
+    lock_delete(lockid);
+}
+
+static void run_owner_protocol_test(lock_type_t type) {
+    int lockid = lock_create(type);
+    TEST_ASSERT_NOT_EQUAL(-1, lockid);
+
+    count_arg_t args[N_THREADS];
+    HANDLE      handles[N_THREADS];
+    for (int i = 0; i < N_THREADS; i++) {
+        args[i]    = (count_arg_t){lockid, N_ITERS};
+        handles[i] = CreateThread(NULL, 0, owner_proto_thread, &args[i], 0, NULL);
+        TEST_ASSERT_NOT_NULL(handles[i]);
+    }
+    WaitForMultipleObjects(N_THREADS, handles, TRUE, INFINITE);
+    for (int i = 0; i < N_THREADS; i++) CloseHandle(handles[i]);
+
+    TEST_ASSERT_EQUAL(0, (int)g_proto_errors);
     lock_delete(lockid);
 }
 
@@ -366,6 +403,27 @@ void test_cross_tu_adaptive_lock_protects_counter(void) {
     run_cross_tu_counter_test(LOCK_ADAPTIVE);
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * Group 9 – ownership record consistency under contention
+ *
+ * Regression tests for issues #1 / #4: s->owner used to be written
+ * outside _lktable.guard, racing with the guarded reads in the
+ * double-take and release-ownership checks.  Every take must succeed,
+ * every double-take must fail, every release by the holder must succeed.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+void test_spin_ownership_protocol_under_contention(void) {
+    run_owner_protocol_test(LOCK_SPIN);
+}
+
+void test_block_ownership_protocol_under_contention(void) {
+    run_owner_protocol_test(LOCK_BLOCK);
+}
+
+void test_adaptive_ownership_protocol_under_contention(void) {
+    run_owner_protocol_test(LOCK_ADAPTIVE);
+}
+
 /* ── main ─────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -412,6 +470,11 @@ int main(void) {
     RUN_TEST(test_cross_tu_spin_lock_protects_counter);
     RUN_TEST(test_cross_tu_block_lock_protects_counter);
     RUN_TEST(test_cross_tu_adaptive_lock_protects_counter);
+
+    /* ownership record consistency */
+    RUN_TEST(test_spin_ownership_protocol_under_contention);
+    RUN_TEST(test_block_ownership_protocol_under_contention);
+    RUN_TEST(test_adaptive_ownership_protocol_under_contention);
 
     return UNITY_END();
 }
