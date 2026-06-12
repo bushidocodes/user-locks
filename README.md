@@ -54,9 +54,13 @@ Release the lock. Only the thread that called `lock_take` may release it.
 
 Returns `0` on success, `-1` on error (invalid id, not held by calling thread).
 
-### `void lock_delete(int lockid)`
+### `int lock_delete(int lockid)`
 
-Free the lock slot for reuse by `lock_create`. Silently ignores invalid ids.
+Free the lock slot for reuse by `lock_create`. The lock must not be held:
+release it first, as with `pthread_mutex_destroy`.
+
+Returns `0` on success, `-1` on error (invalid id, slot not in use, or lock
+currently held).
 
 ## Building
 

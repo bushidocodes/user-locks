@@ -140,6 +140,16 @@ int lock_take(int lockid) {
      * while holding it, since the double-take check in lock_take and the
      * ownership check in lock_release read it under the guard.          */
     EnterCriticalSection(&_lktable.guard);
+    if (!s->in_use) {
+        /* The slot was deleted while we were acquiring the lock word.
+         * Back out exactly like lock_release so other in-flight takers
+         * (spinning or blocked in WaitOnAddress) are not stranded.      */
+        LeaveCriticalSection(&_lktable.guard);
+        InterlockedExchange(&s->locked, 0);
+        if (type == LOCK_BLOCK || type == LOCK_ADAPTIVE)
+            WakeByAddressAll((PVOID)&s->locked);
+        return -1;
+    }
     s->owner = GetCurrentThreadId();
     LeaveCriticalSection(&_lktable.guard);
     return 0;
@@ -183,13 +193,26 @@ int lock_release(int lockid) {
  * Mirrors xv6 lockclose / lockclose_ref (without reference counting,
  * which was needed for fork/exec but is unnecessary in userspace).
  */
-void lock_delete(int lockid) {
+int lock_delete(int lockid) {
     _lk_ensure_init();
-    if (lockid < 0 || lockid >= MAX_NUM_LOCKS) return;
+    if (lockid < 0 || lockid >= MAX_NUM_LOCKS) return -1;
+
+    _lk_slot_t *s = &_lktable.slots[lockid];
 
     EnterCriticalSection(&_lktable.guard);
-    _lktable.slots[lockid].locked = 0;
-    _lktable.slots[lockid].owner  = 0;
-    _lktable.slots[lockid].in_use = 0;
+    if (!s->in_use) {
+        LeaveCriticalSection(&_lktable.guard);
+        return -1;
+    }
+    /* Refuse to delete a held lock: marking the slot free would let
+     * lock_create recycle it while the holder (and any waiters blocked
+     * on s->locked) still reference it.                                 */
+    if (InterlockedCompareExchange(&s->locked, 0, 0) != 0) {
+        LeaveCriticalSection(&_lktable.guard);
+        return -1;
+    }
+    s->owner  = 0;
+    s->in_use = 0;
     LeaveCriticalSection(&_lktable.guard);
+    return 0;
 }

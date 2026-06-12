@@ -40,8 +40,12 @@ int lock_release(int lockid);
 
 /*
  * Free the lock slot, making it available for reuse by lock_create.
+ * The lock must not be held: deleting a held lock would let lock_create
+ * recycle the slot out from under the holder and any blocked waiters.
+ * Returns 0 on success, -1 on error (invalid id, slot not in use, or
+ * lock currently held).
  */
-void lock_delete(int lockid);
+int lock_delete(int lockid);
 
 /*
  * Test helper: reset every slot to unallocated.

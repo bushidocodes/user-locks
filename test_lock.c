@@ -90,6 +90,22 @@ DWORD WINAPI owner_proto_thread(LPVOID p) {
     return 0;
 }
 
+/*
+ * Holds the lock until told to proceed, so the main thread can probe
+ * lock_delete against a lock held by a different thread.
+ * Unity asserts are not thread-safe, so failures are counted instead.
+ */
+typedef struct { int lockid; HANDLE taken; HANDLE proceed; } hold_arg_t;
+
+DWORD WINAPI hold_thread(LPVOID p) {
+    hold_arg_t *a = (hold_arg_t *)p;
+    if (lock_take(a->lockid) != 0)    InterlockedIncrement(&g_proto_errors);
+    SetEvent(a->taken);
+    WaitForSingleObject(a->proceed, INFINITE);
+    if (lock_release(a->lockid) != 0) InterlockedIncrement(&g_proto_errors);
+    return 0;
+}
+
 /* ── test helpers ─────────────────────────────────────────────────────── */
 
 static void run_counter_test(lock_type_t type) {
@@ -424,6 +440,71 @@ void test_adaptive_ownership_protocol_under_contention(void) {
     run_owner_protocol_test(LOCK_ADAPTIVE);
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * Group 10 – lock_delete safety
+ *
+ * Regression tests for issue #2: lock_delete used to unconditionally
+ * zero the slot even while the lock was held, letting lock_create
+ * recycle it out from under the holder and any blocked waiters.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+void test_delete_invalid_id_fails(void) {
+    TEST_ASSERT_EQUAL(-1, lock_delete(-1));
+    TEST_ASSERT_EQUAL(-1, lock_delete(MAX_NUM_LOCKS));
+    TEST_ASSERT_EQUAL(-1, lock_delete(9999));
+}
+
+void test_delete_unused_slot_fails(void) {
+    /* Never-created slot. */
+    TEST_ASSERT_EQUAL(-1, lock_delete(0));
+
+    /* Double delete. */
+    int id = lock_create(LOCK_SPIN);
+    TEST_ASSERT_NOT_EQUAL(-1, id);
+    TEST_ASSERT_EQUAL(0,  lock_delete(id));
+    TEST_ASSERT_EQUAL(-1, lock_delete(id));
+}
+
+void test_delete_held_lock_fails_until_released(void) {
+    int id = lock_create(LOCK_SPIN);
+    TEST_ASSERT_NOT_EQUAL(-1, id);
+
+    TEST_ASSERT_EQUAL(0,  lock_take(id));
+    TEST_ASSERT_EQUAL(-1, lock_delete(id));   /* held: must refuse      */
+
+    /* The failed delete must leave the lock fully functional. */
+    TEST_ASSERT_EQUAL(0,  lock_release(id));
+    TEST_ASSERT_EQUAL(0,  lock_take(id));
+    TEST_ASSERT_EQUAL(0,  lock_release(id));
+
+    TEST_ASSERT_EQUAL(0,  lock_delete(id));   /* free: delete succeeds  */
+}
+
+void test_delete_held_by_other_thread_fails(void) {
+    int id = lock_create(LOCK_BLOCK);
+    TEST_ASSERT_NOT_EQUAL(-1, id);
+
+    hold_arg_t a = { id,
+                     CreateEvent(NULL, TRUE, FALSE, NULL),
+                     CreateEvent(NULL, TRUE, FALSE, NULL) };
+    TEST_ASSERT_NOT_NULL(a.taken);
+    TEST_ASSERT_NOT_NULL(a.proceed);
+    HANDLE h = CreateThread(NULL, 0, hold_thread, &a, 0, NULL);
+    TEST_ASSERT_NOT_NULL(h);
+
+    WaitForSingleObject(a.taken, INFINITE);
+    TEST_ASSERT_EQUAL(-1, lock_delete(id));   /* held by worker thread  */
+
+    SetEvent(a.proceed);
+    WaitForSingleObject(h, INFINITE);
+    CloseHandle(h);
+    CloseHandle(a.taken);
+    CloseHandle(a.proceed);
+
+    TEST_ASSERT_EQUAL(0, (int)g_proto_errors);
+    TEST_ASSERT_EQUAL(0, lock_delete(id));    /* released: delete ok    */
+}
+
 /* ── main ─────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -475,6 +556,12 @@ int main(void) {
     RUN_TEST(test_spin_ownership_protocol_under_contention);
     RUN_TEST(test_block_ownership_protocol_under_contention);
     RUN_TEST(test_adaptive_ownership_protocol_under_contention);
+
+    /* lock_delete safety */
+    RUN_TEST(test_delete_invalid_id_fails);
+    RUN_TEST(test_delete_unused_slot_fails);
+    RUN_TEST(test_delete_held_lock_fails_until_released);
+    RUN_TEST(test_delete_held_by_other_thread_fails);
 
     return UNITY_END();
 }
