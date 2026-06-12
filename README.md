@@ -21,8 +21,8 @@ is omitted here.
 
 ## API
 
-All four functions live in the single header `lock.h` (static inline, no separate
-`.c` required).
+Declarations live in `lock.h`; definitions and the shared lock table live in
+`lock.c`. Link both translation units — no header-only / static-inline design.
 
 ### `int lock_create(lock_type_t type)`
 
@@ -88,7 +88,7 @@ ctest --test-dir build --output-on-failure
 
 ## Tests
 
-22 unit tests using the vendored [Unity](https://github.com/ThrowTheSwitch/Unity)
+33 unit tests using the vendored [Unity](https://github.com/ThrowTheSwitch/Unity)
 framework (v2.5.2), organized to mirror the homework's level progression:
 
 | Group | Tests | Mirrors |
@@ -100,12 +100,15 @@ framework (v2.5.2), organized to mirror the homework's level progression:
 | `LOCK_ADAPTIVE` concurrent | counter, race detection | lvl 3 |
 | multiple locks | three independent locks held simultaneously | lvl 4 |
 | resource exhaustion | 200 sequential create/delete cycles never exhaust 16 slots | — |
+| multi-TU correctness | lock ID visible across translation units; cross-TU counter tests for all three lock types | — |
+| ownership protocol under contention | take/double-take/release protocol correct under heavy concurrency (regression for issues #1/#4) | — |
+| `lock_delete` safety | invalid id, unused slot, delete-while-held refused, delete held by other thread refused (regression for issue #2) | — |
 
 ## Architecture comparison
 
 | | xv6 kernel | user-locks |
 |---|---|---|
-| Lock storage | `locktable` in kernel BSS | `_lktable` static in `lock.h` |
+| Lock storage | `locktable` in kernel BSS | `_lktable` static in `lock.c` |
 | Table guard | kernel `spinlock` | `CRITICAL_SECTION` |
 | Spin primitive | `xchg` inline asm | `InterlockedExchange` |
 | Block primitive | `sleep(chan, lk)` / `wakeup(chan)` | `WaitOnAddress` / `WakeByAddressAll` |
